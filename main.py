@@ -1,241 +1,225 @@
-import os,sys,re,time,json
-import requests,bs4,string
-import faker,fake_email,random
-from faker import Faker
-from fake_email import Email
+# app.py
+from flask import Flask, render_template_string, request, jsonify
+import requests
+import re
 from bs4 import BeautifulSoup
 
-W = "\x1b[97m"
-G = "\x1b[38;5;46m"
-R = "\x1b[38;5;196m"
-X = f"{W}<{R}•{W}>"
+app = Flask(__name__)
 
-oks = []
-cps = []
+HTML = """
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>POST & PROFILE UID</title>
+<style>
+  /* Simple styling inspired by your screenshot */
+  body {
+    background: linear-gradient(180deg,#0f1116 0%, #1b1418 100%);
+    font-family: "Segoe UI", Roboto, Arial, sans-serif;
+    color: #b6f5b6;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    min-height:100vh;
+    margin:0;
+  }
+  .card{
+    width:360px;
+    background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+    border-radius:18px;
+    padding:22px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.6);
+    border: 1px solid rgba(255,255,255,0.04);
+  }
+  h1 { color:#ff9a00; text-align:center; margin:0 0 14px; font-size:22px; letter-spacing:2px;}
+  label { color:#4fe0ff; font-size:13px; display:block; margin-bottom:8px;}
+  input[type="text"]{
+    width:100%;
+    padding:14px;
+    border-radius:12px;
+    border:1px solid rgba(255,255,255,0.06);
+    background: rgba(0,0,0,0.25);
+    color:#ddd;
+    outline:none;
+    box-sizing:border-box;
+    font-size:14px;
+  }
+  .btn {
+    display:block;
+    margin-top:14px;
+    width:100%;
+    padding:14px;
+    background: linear-gradient(90deg,#ff8a00,#ff5f3b);
+    color:#fff;
+    font-weight:600;
+    border:none;
+    border-radius:12px;
+    cursor:pointer;
+    font-size:16px;
+  }
+  .result {
+    margin-top:18px;
+    padding:14px;
+    border-radius:10px;
+    background: rgba(0,0,0,0.35);
+    border:1px solid rgba(79,224,255,0.08);
+    color:#47ff7a;
+    word-wrap:break-word;
+    text-align:center;
+  }
+  .error { color:#ff6b6b; }
+  .copy-btn{
+    margin-top:10px;
+    display:inline-block;
+    padding:8px 12px;
+    border-radius:8px;
+    background: #00d4ff;
+    color:#023047;
+    font-weight:700;
+    cursor:pointer;
+    border:none;
+  }
+  .small { font-size:12px; color:#9aa4b2; margin-top:12px; text-align:center;}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>POST & PROFILE UID</h1>
+    <label for="fburl">PASTE FB POST OR PROFILE LINK</label>
+    <input id="fburl" type="text" placeholder="e.g: https://www.facebook.com/username_or_post_link">
+    <button id="getuid" class="btn">🔍 GET UID</button>
 
-from fake_useragent import UserAgent
-ua = UserAgent()
-def ugenX():
-    ualist = [ua.random for _ in range(50)]
-    return str(random.choice(ualist))
+    <div id="output" class="result" style="display:none;"></div>
+    <div class="small">© 2025 CODED BY TABBU ARAIN.</div>
+  </div>
 
-def fake_name():
-    first = Faker().first_name()
-    last = Faker().last_name()
-    return first,last
+<script>
+document.getElementById('getuid').addEventListener('click', async () => {
+  const url = document.getElementById('fburl').value.trim();
+  const output = document.getElementById('output');
+  output.style.display = 'block';
+  output.innerHTML = 'Processing...';
+  try {
+    const res = await fetch('/extract_uid', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ url })
+    });
+    const data = await res.json();
+    if(data.success){
+      output.innerHTML = '<div style="font-size:18px; font-weight:700;">' + data.uid + '</div>' +
+        '<button class="copy-btn" onclick="navigator.clipboard.writeText(\\'' + data.uid + '\\')">COPY UID</button>';
+    } else {
+      output.innerHTML = '<span class="error">' + (data.error || 'UID not found') + '</span>';
+    }
+  } catch(err){
+    output.innerHTML = '<span class="error">Server error. Try again.</span>';
+  }
+});
+</script>
+</body>
+</html>
+"""
 
-def extractor(data):
+# Patterns to look for in HTML/text to extract numeric id:
+UID_PATTERNS = [
+    re.compile(r'profile\.php\?id=(\d{5,})'),
+    re.compile(r'ft_ent_identifier[":\']+?(\d{5,})'),
+    re.compile(r'entity_id[":\']+?(\d{5,})'),
+    re.compile(r'owner[":\']\s*{[^}]*id[":\']\s*"?(\d{5,})'),
+    re.compile(r'"pageID":\s*"?(\\?(\d{5,}))'),
+    # Generic long digit sequences (15+ digits common in FB ids)
+    re.compile(r'(\d{9,25})'),
+]
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
+}
+
+def extract_uid_from_text(text):
+    # Try specific patterns first
+    for pat in UID_PATTERNS:
+        for m in pat.finditer(text):
+            # pick reasonable ids (avoid timestamps like 2024...)
+            uid = m.group(1)
+            if uid and len(re.sub(r'^0+','',uid)) >= 5:
+                # prefer numeric sequences that are not obviously dates
+                return uid
+    return None
+
+def fetch_page_text(url):
     try:
-        soup = BeautifulSoup(data,"html.parser")
-        data = {}
-        for inputs in soup.find_all("input"):
-            name = inputs.get("name")
-            value = inputs.get("value")
-            if name:
-                data[name] = value
-        return data
-    except Exception as e:
-        return {"error":str(e)}
-
-def GetEmail():
-    response = requests.post('https://api.internal.temp-mail.io/api/v3/email/new').json()
-    return response['email']
-
-def GetCode(email):
-    try:
-        response = requests.get(f'https://api.internal.temp-mail.io/api/v3/email/{email}/messages').text
-        code = re.search(r'FB-(\d+)', response).group(1)
-        return code
-    except:
+        resp = requests.get(url, headers=HEADERS, timeout=12, allow_redirects=True)
+        if resp.status_code == 200:
+            return resp.text
+        else:
+            return None
+    except requests.RequestException:
         return None
 
-def banner():
-    os.system("clear")
-    print(f"{W}<{R}•{W}> FACEBOOK AUTO ID CREATOR")
-    print(f"{W}<{R}•{W}> CODED :- {G}HADI ANHAF AIMAN")
-    print(f"{W}———————————————————————————————")
+@app.route('/', methods=['GET'])
+def index():
+    return render_template_string(HTML)
 
-def linex():
-    print(f"{W}———————————————————————————————")
+@app.route('/extract_uid', methods=['POST'])
+def extract_uid():
+    data = request.get_json() or {}
+    url = (data.get('url') or '').strip()
+    if not url:
+        return jsonify(success=False, error="Koi URL nahi diya gaya.")
+    # Pre-check: if URL already contains profile.php?id=
+    m = re.search(r'profile\.php\?id=(\d{5,})', url)
+    if m:
+        return jsonify(success=True, uid=m.group(1))
 
-def main() -> None:
-    banner()
-    input(f"{X} PRESS ENTER TO START....")
-    linex()
-    for make in range(100):
-        ses = requests.Session()
-        response = ses.get(
-            url='https://x.facebook.com/reg',
-            params={"_rdc":"1","_rdr":"","wtsid":"rdr_0t3qOXoIHbMS6isLw","refsrc":"deprecated"},
-        )
-        mts = ses.get("https://x.facebook.com").text
-        m_ts = re.search(r'name="m_ts" value="(.*?)"',str(mts)).group(1)
-        formula = extractor(response.text)
-        email2 = GetEmail()
-        firstname,lastname = fake_name()
-        print(f"{X} NAME  - {G}{firstname} {lastname}")
-        print(f"{X} EMAIL - {G}{email2}")
-        payload = {
-            'ccp': "2",
-            'reg_instance': str(formula["reg_instance"]),
-            'submission_request': "true",
-            'helper': "",
-            'reg_impression_id': str(formula["reg_impression_id"]),
-            'ns': "1",
-            'zero_header_af_client': "",
-            'app_id': "103",
-            'logger_id': str(formula["logger_id"]),
-            'field_names[0]': "firstname",
-            'firstname': firstname,
-            'lastname': lastname,
-            'field_names[1]': "birthday_wrapper",
-            'birthday_day': str(random.randint(1,28)),
-            'birthday_month': str(random.randint(1,12)),
-            'birthday_year': str(random.randint(1992,2009)),
-            'age_step_input': "",
-            'did_use_age': "false",
-            'field_names[2]': "reg_email__",
-            'reg_email__': email2,
-            'field_names[3]': "sex",
-            'sex': "2",
-            'preferred_pronoun': "",
-            'custom_gender': "",
-            'field_names[4]': "reg_passwd__",
-            'name_suggest_elig': "false",
-            'was_shown_name_suggestions': "false",
-            'did_use_suggested_name': "false",
-            'use_custom_gender': "false",
-            'guid': "",
-            'pre_form_step': "",
-            'encpass': '#PWD_BROWSER:0:{}:{}'.format(str(time.time()).split('.')[0],"MrCode@123"),
-            'submit': "Sign Up",
-            'fb_dtsg': "NAcMC2x5X2VrJ7jhipS0eIpYv1zLRrDsb5y2wzau2bw3ipw88fbS_9A:0:0",
-            'jazoest': str(formula["jazoest"]),
-            'lsd': str(formula["lsd"]),
-            '__dyn': "1ZaaAG1mxu1oz-l0BBBzEnxG6U4a2i5U4e0C8dEc8uwcC4o2fwcW4o3Bw4Ewk9E4W0pKq0FE6S0x81vohw5Owk8aE36wqEd8dE2YwbK0iC1qw8W0k-0jG3qaw4kwbS1Lw9C0le0ue0QU",
-            '__csr': "",
-            '__req': "p",
-            '__fmt': "1",
-            '__a': "AYkiA9jnQluJEy73F8jWiQ3NTzmH7L6RFbnJ_SMT_duZcpo2yLDpuVXfU2doLhZ-H1lSX6ucxsegViw9lLO6uRx31-SpnBlUEDawD_8U7AY4kQ",
-            '__user': "0"
-        }
-        header1 = {
-            "Host":"m.facebook.com",
-            "Connection":"keep-alive",
-            "Upgrade-Insecure-Requests":"1",
-            "User-Agent":ugenX(),
-            "Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "dnt":"1",
-            "X-Requested-With":"mark.via.gp",
-            "Sec-Fetch-Site":"none",
-            "Sec-Fetch-Mode":"navigate",
-            "Sec-Fetch-User":"?1",
-            "Sec-Fetch-Dest":"document",
-            "dpr":"1.75",
-            "viewport-width":"980",
-            "sec-ch-ua":"\"Android WebView\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
-            "sec-ch-ua-mobile":"?1",
-            "sec-ch-ua-platform":"\"Android\"",
-            "sec-ch-ua-platform-version":"\"\"",
-            "sec-ch-ua-model":"\"\"",
-            "sec-ch-ua-full-version-list":"",
-            "sec-ch-prefers-color-scheme":"dark",
-            "Accept-Encoding":"gzip, deflate, br, zstd",
-            "Accept-Language":"en-GB,en-US;q=0.9,en;q=0.8"
-        }
-        reg_url = "https://www.facebook.com/reg/submit/?privacy_mutation_token=eyJ0eXBlIjowLCJjcmVhdGlvbl90aW1lIjoxNzM0NDE0OTk2LCJjYWxsc2l0ZV9pZCI6OTA3OTI0NDAyOTQ4MDU4fQ%3D%3D&multi_step_form=1&skip_suma=0&shouldForceMTouch=1"
-        py_submit = ses.post(reg_url, data=payload, headers=header1)
-        #print(ses.cookies.get_dict().items())
-        if "c_user" in py_submit.cookies:
-            first_cok = ses.cookies.get_dict()
-            uid = str(first_cok["c_user"])
-            header2 = {
-                'authority': 'm.facebook.com',
-                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                'accept-language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-                'cache-control': 'max-age=0',
-                'dpr': '2',
-                'referer': 'https://m.facebook.com/login/save-device/',
-                'sec-ch-prefers-color-scheme': 'light',
-                'sec-ch-ua': '"Not/A)Brand";v="8", "Chromium";v="125", "Google Chrome";v="125"',
-                'sec-ch-ua-mobile': '?1',
-                'sec-ch-ua-platform': '"Android"',
-                'sec-fetch-dest': 'document',
-                'sec-fetch-mode': 'navigate',
-                'sec-fetch-site': 'same-origin',
-                'sec-fetch-user': '?1',
-                'upgrade-insecure-requests': '1',
-                'user-agent': ugenX(),
-                'viewport-width': '980',      
-            }
-            params = {
-                'next': 'https://m.facebook.com/?deoia=1',
-                'soft': 'hjk',
-            }
-            con_sub = ses.get('https://x.facebook.com/confirmemail.php', params=params, headers=header2).text
-            valid = GetCode(email2)
-            if valid:
-                print(f"{X} FB UID - {G}{uid}")
-                print(f"{X} LOGIN OTP - {G}{valid}")
-                confirm_id(email2,uid,valid,con_sub,ses)
-            else:
-                print(f"{X} \x1b[38;5;206mSUCCESSFULLY DISABLED ID")
-                linex()
-        else:
-            print(f"{X} {R}SUCCESSFULLY CHECKPOINT ID")
-            linex()
+    # Try to extract trailing numeric id in path (some share links contain long digits)
+    m2 = re.search(r'/(\d{9,25})(?:[/?]|$)', url)
+    if m2:
+        return jsonify(success=True, uid=m2.group(1))
 
-def confirm_id(mail,uid,otp,data,ses):
+    # Fetch page and parse
+    page = fetch_page_text(url)
+    if not page:
+        return jsonify(success=False, error="Facebook page fetch nahi hua (shayed private ya blocked).")
+
+    # Quick search in raw HTML
+    uid = extract_uid_from_text(page)
+    if uid:
+        return jsonify(success=True, uid=uid)
+
+    # Try to parse Open Graph meta tags and scripts using BeautifulSoup
     try:
-        url = "https://m.facebook.com/confirmation_cliff/"
-        params = {
-        'contact': mail,
-        'type': "submit",
-        'is_soft_cliff': "false",
-        'medium': "email",
-        'code': otp}
-        payload = {
-        'fb_dtsg': 'NAcMC2x5X2VrJ7jhipS0eIpYv1zLRrDsb5y2wzau2bw3ipw88fbS_9A:0:0',
-        'jazoest': re.search(r'"\d+"', data).group().strip('"'),
-        'lsd': re.search('"LSD",\[\],{"token":"([^"]+)"}',str(data)).group(1),
-        '__dyn': "",
-        '__csr': "",
-        '__req': "4",
-        '__fmt': "1",
-        '__a': "",
-        '__user': uid}
-        headers = {
-        'User-Agent': ugenX(),
-        'Accept-Encoding': "gzip, deflate, br, zstd",
-        'sec-ch-ua-full-version-list': "",
-        'sec-ch-ua-platform': "\"Android\"",
-        'sec-ch-ua': "\"Android WebView\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
-        'sec-ch-ua-model': "\"\"",
-        'sec-ch-ua-mobile': "?1",
-        'x-asbd-id': "129477",
-        'x-fb-lsd': "KnpjLz-YdSXR3zBqds98cK",
-        'sec-ch-prefers-color-scheme': "light",
-        'sec-ch-ua-platform-version': "\"\"",
-        'origin': "https://m.facebook.com",
-        'x-requested-with': "mark.via.gp",
-        'sec-fetch-site': "same-origin",
-        'sec-fetch-mode': "cors",
-        'sec-fetch-dest': "empty",
-        'referer': "https://m.facebook.com/confirmemail.php?next=https%3A%2F%2Fm.facebook.com%2F%3Fdeoia%3D1&soft=hjk",
-        'accept-language': "en-GB,en-US;q=0.9,en;q=0.8",
-        'priority': "u=1, i"}
-        response = ses.post(url, params=params, data=payload, headers=headers)
-        if "checkpoint" in str(response.url):
-            print(f"{X}{R} FUCKED ID DISABLED")
-            linex()
-        else:
-            cookie = (";").join([ "%s=%s" % (key,value) for key,value in ses.cookies.get_dict().items()])
-            print(f"{X} SUCCESS - {G}{uid}|MrCode@123|{cookie}")
-            open("/sdcard/SUCCESS-OK-ID.txt","a").write(uid+"|MrCode@123|"+cookie+"\n")
-            linex()
-    except Exception as e:
-        linex()
+        soup = BeautifulSoup(page, "html.parser")
+        # OG tags sometimes contain canonical URL with numeric id
+        for tag in soup.find_all('meta'):
+            if tag.get('property') in ('al:android:url','al:ios:url','og:url','og:image'):
+                content = tag.get('content','')
+                m = re.search(r'profile\.php\?id=(\d{5,})', content)
+                if m:
+                    return jsonify(success=True, uid=m.group(1))
+                m2 = re.search(r'/(\d{9,25})(?:[/?]|$)', content)
+                if m2:
+                    return jsonify(success=True, uid=m2.group(1))
+        # search scripts for ft_ent_identifier
+        scripts = soup.find_all('script')
+        for s in scripts:
+            text = s.string or s.get_text() or ""
+            uid = extract_uid_from_text(text)
+            if uid:
+                return jsonify(success=True, uid=uid)
+    except Exception:
         pass
 
-if __name__ == "__main__":
-    main()
+    # Final fallback: look for long digits anywhere (but filter out short years)
+    mfinal = re.search(r'(\d{9,25})', page)
+    if mfinal:
+        candidate = mfinal.group(1)
+        return jsonify(success=True, uid=candidate)
+
+    return jsonify(success=False, error="UID nahi mila. Ho sakta hai page private ho ya Facebook ne content block kiya ho.")
+
+if __name__ == '__main__':
+    # Run on 0.0.0.0:5000 for Replit/Termux compatibility
+    app.run(host='0.0.0.0', port=5000, debug=True)
