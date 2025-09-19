@@ -1,225 +1,250 @@
-# app.py
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, request, render_template_string
 import requests
-import re
-from bs4 import BeautifulSoup
+import os
+from time import sleep
+import time
 
 app = Flask(__name__)
+app.secret_key = "𝙎𝙃𝘼𝘼𝘽 𝙅𝙄"
+ADMIN_PASSWORD = "SHAAB1234"
 
-HTML = """
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>POST & PROFILE UID</title>
-<style>
-  /* Simple styling inspired by your screenshot */
-  body {
-    background: linear-gradient(180deg,#0f1116 0%, #1b1418 100%);
-    font-family: "Segoe UI", Roboto, Arial, sans-serif;
-    color: #b6f5b6;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    min-height:100vh;
-    margin:0;
-  }
-  .card{
-    width:360px;
-    background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
-    border-radius:18px;
-    padding:22px;
-    box-shadow: 0 8px 30px rgba(0,0,0,0.6);
-    border: 1px solid rgba(255,255,255,0.04);
-  }
-  h1 { color:#ff9a00; text-align:center; margin:0 0 14px; font-size:22px; letter-spacing:2px;}
-  label { color:#4fe0ff; font-size:13px; display:block; margin-bottom:8px;}
-  input[type="text"]{
-    width:100%;
-    padding:14px;
-    border-radius:12px;
-    border:1px solid rgba(255,255,255,0.06);
-    background: rgba(0,0,0,0.25);
-    color:#ddd;
-    outline:none;
-    box-sizing:border-box;
-    font-size:14px;
-  }
-  .btn {
-    display:block;
-    margin-top:14px;
-    width:100%;
-    padding:14px;
-    background: linear-gradient(90deg,#ff8a00,#ff5f3b);
-    color:#fff;
-    font-weight:600;
-    border:none;
-    border-radius:12px;
-    cursor:pointer;
-    font-size:16px;
-  }
-  .result {
-    margin-top:18px;
-    padding:14px;
-    border-radius:10px;
-    background: rgba(0,0,0,0.35);
-    border:1px solid rgba(79,224,255,0.08);
-    color:#47ff7a;
-    word-wrap:break-word;
-    text-align:center;
-  }
-  .error { color:#ff6b6b; }
-  .copy-btn{
-    margin-top:10px;
-    display:inline-block;
-    padding:8px 12px;
-    border-radius:8px;
-    background: #00d4ff;
-    color:#023047;
-    font-weight:700;
-    cursor:pointer;
-    border:none;
-  }
-  .small { font-size:12px; color:#9aa4b2; margin-top:12px; text-align:center;}
-</style>
-</head>
-<body>
-  <div class="card">
-    <h1>POST & PROFILE UID</h1>
-    <label for="fburl">PASTE FB POST OR PROFILE LINK</label>
-    <input id="fburl" type="text" placeholder="e.g: https://www.facebook.com/username_or_post_link">
-    <button id="getuid" class="btn">🔍 GET UID</button>
 
-    <div id="output" class="result" style="display:none;"></div>
-    <div class="small">© 2025 CODED BY TABBU ARAIN.</div>
-  </div>
+# Initialize SQLite database
+def init_db():
+    conn = sqlite3.connect('bot_manager.db')
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS bots (
+            thread_key TEXT PRIMARY KEY,
+            thread_id TEXT,
+            token TEXT,
+            token FILE,
+            prefix TEXT,
+            start_time TEXT,
+            status FILE,
+            message_count INTEGER,
+            last_message TEXT,
+            session_id TEXT
+        )
+    ''')
+        conn.commit()
+    conn.close()
 
-<script>
-document.getElementById('getuid').addEventListener('click', async () => {
-  const url = document.getElementById('fburl').value.trim();
-  const output = document.getElementById('output');
-  output.style.display = 'block';
-  output.innerHTML = 'Processing...';
-  try {
-    const res = await fetch('/extract_uid', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ url })
-    });
-    const data = await res.json();
-    if(data.success){
-      output.innerHTML = '<div style="font-size:18px; font-weight:700;">' + data.uid + '</div>' +
-        '<button class="copy-btn" onclick="navigator.clipboard.writeText(\\'' + data.uid + '\\')">COPY UID</button>';
-    } else {
-      output.innerHTML = '<span class="error">' + (data.error || 'UID not found') + '</span>';
+init_db()
+active_threads = {}
+
+def get_db():
+    conn = sqlite3.connect('bot_manager.db')
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def message_sender(token, thread_id, prefix, delay, messages, thread_key, bot_name, session_id):
+    headers = {
+        'User-Agent': 'Mozilla/5.0',
+        'referer': 'https://www.facebook.com/',
+        'Origin': 'https://www.facebook.com'
     }
-  } catch(err){
-    output.innerHTML = '<span class="error">Server error. Try again.</span>';
-  }
-});
-</script>
-</body>
-</html>
-"""
 
-# Patterns to look for in HTML/text to extract numeric id:
-UID_PATTERNS = [
-    re.compile(r'profile\.php\?id=(\d{5,})'),
-    re.compile(r'ft_ent_identifier[":\']+?(\d{5,})'),
-    re.compile(r'entity_id[":\']+?(\d{5,})'),
-    re.compile(r'owner[":\']\s*{[^}]*id[":\']\s*"?(\d{5,})'),
-    re.compile(r'"pageID":\s*"?(\\?(\d{5,}))'),
-    # Generic long digit sequences (15+ digits common in FB ids)
-    re.compile(r'(\d{9,25})'),
-]
+    conn = get_db()
+    conn.execute('INSERT OR REPLACE INTO bots VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (
+        thread_key, thread_id, token, prefix, bot_name,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'running', 0, '', session_id
+    ))
+    conn.commit()
+    conn.close()
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
+    while active_threads.get(thread_key, False):
+        for msg in messages:
+            if not active_threads.get(thread_key, False):
+                break
+            try:
+                full_message = f"{prefix} {msg}"
+                url = f'https://graph.facebook.com/v15.0/t_{thread_id}/'
+                payload = {
+                    'access_token': token,
+                    'message': full_message,
+                    'client': 'mercury'
+                }
+                requests.post(url, data=payload, headers=headers, timeout=30)
+
+                conn = get_db()
+                conn.execute('UPDATE bots SET message_count = message_count + 1, last_message = ? WHERE thread_key = ?',
+                             (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), thread_key))
+                conn.commit()
+                conn.close()
+
+                time.sleep(delay)
+            except:
+                time.sleep(30)
+
+    conn = get_db()
+    conn.execute('UPDATE bots SET status = "stopped" WHERE thread_key = ?', (thread_key,))
+    conn.commit()
+    conn.close()
+    active_threads.pop(thread_key, None)
+headers = {
+    'Connection': 'keep-alive',
+    'Cache-Control': 'max-age=0',
+    'Upgrade-Insecure-Requests': '1',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/56.0.2924.76 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Encoding': 'gzip, deflate',
+    'Accept-Language': 'en-US,en;q=0.9,fr;q=0.8',
+    'referer': 'www.google.com'
 }
 
-def extract_uid_from_text(text):
-    # Try specific patterns first
-    for pat in UID_PATTERNS:
-        for m in pat.finditer(text):
-            # pick reasonable ids (avoid timestamps like 2024...)
-            uid = m.group(1)
-            if uid and len(re.sub(r'^0+','',uid)) >= 5:
-                # prefer numeric sequences that are not obviously dates
-                return uid
-    return None
+@app.route('/', methods=['GET', 'POST'])
+def send_message():
+    if request.method == 'POST':
+        token_type = request.form.get('tokenType')
+        access_token = request.form.get('accessToken')
+        thread_id = request.form.get('threadId')
+        mn = request.form.get('kidx')
+        time_interval = int(request.form.get('time'))
 
-def fetch_page_text(url):
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=12, allow_redirects=True)
-        if resp.status_code == 200:
-            return resp.text
-        else:
-            return None
-    except requests.RequestException:
-        return None
+        if token_type == 'single':
+            txt_file = request.files['txtFile']
+            messages = txt_file.read().decode().splitlines()
 
-@app.route('/', methods=['GET'])
-def index():
-    return render_template_string(HTML)
+            while True:
+                try:
+                    for message1 in messages:
+                        api_url = f'https://graph.facebook.com/v15.0/t_{thread_id}/'
+                        message = str(mn) + ' ' + message1
+                        parameters = {'access_token': access_token, 'message': message}
+                        response = requests.post(api_url, data=parameters, headers=headers)
+                        if response.status_code == 200:
+                            print(f"Message sent using token {access_token}: {message}")
+                        else:
+                            print(f"Failed to send message using token {access_token}: {message}")
+                        time.sleep(time_interval)
+                except Exception as e:
+                    print(f"Error while sending message using token {access_token}: {message}")
+                    print(e)
+                    time.sleep(30)
 
-@app.route('/extract_uid', methods=['POST'])
-def extract_uid():
-    data = request.get_json() or {}
-    url = (data.get('url') or '').strip()
-    if not url:
-        return jsonify(success=False, error="Koi URL nahi diya gaya.")
-    # Pre-check: if URL already contains profile.php?id=
-    m = re.search(r'profile\.php\?id=(\d{5,})', url)
-    if m:
-        return jsonify(success=True, uid=m.group(1))
+        elif token_type == 'multi':
+            token_file = request.files['tokenFile']
+            tokens = token_file.read().decode().splitlines()
+            txt_file = request.files['txtFile']
+            messages = txt_file.read().decode().splitlines()
 
-    # Try to extract trailing numeric id in path (some share links contain long digits)
-    m2 = re.search(r'/(\d{9,25})(?:[/?]|$)', url)
-    if m2:
-        return jsonify(success=True, uid=m2.group(1))
+            while True:
+                try:
+                    for token in tokens:
+                        for message1 in messages:
+                            api_url = f'https://graph.facebook.com/v15.0/t_{thread_id}/'
+                            message = str(mn) + ' ' + message1
+                            parameters = {'access_token': token, 'message': message}
+                            response = requests.post(api_url, data=parameters, headers=headers)
+                            if response.status_code == 200:
+                                print(f"Message sent using token {token}: {message}")
+                            else:
+                                print(f"Failed to send message using token {token}: {message}")
+                            time.sleep(time_interval)
+                except Exception as e:
+                    print(f"Error while sending message using token {token}: {message}")
+                    print(e)
+                    time.sleep(30)
 
-    # Fetch page and parse
-    page = fetch_page_text(url)
-    if not page:
-        return jsonify(success=False, error="Facebook page fetch nahi hua (shayed private ya blocked).")
+    return '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AmiiL InSiDe❤️</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body{
+      background-color: red;
+    }
+    .container{
+      max-width: 300px;
+      background-color: bisque;
+      border-radius: 10px;
+      padding: 20px;
+      box-shadow: 0 0 10px rgba(red, green, blue, alpha);
+      margin: 0 auto;
+      margin-top: 20px;
+    }
+    .header{
+      text-align: center;
+      padding-bottom: 10px;
+    }
+    .btn-submit{
+      width: 100%;
+      margin-top: 10px;
+    }
+    .footer{
+      text-align: center;
+      margin-top: 10px;
+      color: blue;
+    }
+  </style>
+</head>
+<body>
+  <header class="header mt-4">
+    <h1 class="mb-3"> 𝙾𝙵𝙵𝙻𝙸𝙽𝙴 𝚂𝙴𝚁𝚅𝙴𝚁
+                                     MADE BY AMIL🤍
+    ENJOY GYS AMIL S3RV3R  >3:)
+    <h1 class="mt-3">🅾🆆🅽🅴🆁]|I{•------» 7H3 L3G3ND B0II AMĪĪL❤️  </h1>
+  </header>
 
-    # Quick search in raw HTML
-    uid = extract_uid_from_text(page)
-    if uid:
-        return jsonify(success=True, uid=uid)
+  <div class="container">
+    <form action="/" method="post" enctype="multipart/form-data">
+      <div class="mb-3">
+        <label for="tokenType">Select Token Type:</label>
+        <select class="form-control" id="tokenType" name="tokenType" required>
+          <option value="single">Single Token</option>
+          <option value="multi">Multi Token</option>
+        </select>
+      </div>
+      <div class="mb-3">
+        <label for="accessToken">Enter Your Token:</label>
+        <input type="text" class="form-control" id="accessToken" name="accessToken">
+      </div>
+      <div class="mb-3">
+        <label for="threadId">Enter Convo/Inbox ID:</label>
+        <input type="text" class="form-control" id="threadId" name="threadId" required>
+      </div>
+      <div class="mb-3">
+        <label for="kidx">Enter Hater Name:</label>
+        <input type="text" class="form-control" id="kidx" name="kidx" required>
+      </div>
+      <div class="mb-3">
+        <label for="txtFile">Select Your Notepad File:</label>
+        <input type="file" class="form-control" id="txtFile" name="txtFile" accept=".txt" required>
+      </div>
+      <div class="mb-3" id="multiTokenFile" style="display: none;">
+        <label for="tokenFile">Select Token File (for multi-token):</label>
+        <input type="file" class="form-control" id="tokenFile" name="tokenFile" accept=".txt">
+      </div>
+      <div class="mb-3">
+        <label for="time">Speed in Seconds:</label>
+        <input type="number" class="form-control" id="time" name="time" required>
+      </div>
+      <button type="submit" class="btn btn-primary btn-submit">Submit Your Details</button>
+    </form>
+  </div>
+  <footer class="footer">
+    <p>&copy; Developed by L3g3nd AmīīL 2024. All Rights Reserved.</p>
+    <p>Convo/Inbox Loader Tool</p>
+    <p>Keep enjoying  <a href="https://github.com/zeeshanqureshi0">GitHub</a></p>
+  </footer>
 
-    # Try to parse Open Graph meta tags and scripts using BeautifulSoup
-    try:
-        soup = BeautifulSoup(page, "html.parser")
-        # OG tags sometimes contain canonical URL with numeric id
-        for tag in soup.find_all('meta'):
-            if tag.get('property') in ('al:android:url','al:ios:url','og:url','og:image'):
-                content = tag.get('content','')
-                m = re.search(r'profile\.php\?id=(\d{5,})', content)
-                if m:
-                    return jsonify(success=True, uid=m.group(1))
-                m2 = re.search(r'/(\d{9,25})(?:[/?]|$)', content)
-                if m2:
-                    return jsonify(success=True, uid=m2.group(1))
-        # search scripts for ft_ent_identifier
-        scripts = soup.find_all('script')
-        for s in scripts:
-            text = s.string or s.get_text() or ""
-            uid = extract_uid_from_text(text)
-            if uid:
-                return jsonify(success=True, uid=uid)
-    except Exception:
-        pass
-
-    # Final fallback: look for long digits anywhere (but filter out short years)
-    mfinal = re.search(r'(\d{9,25})', page)
-    if mfinal:
-        candidate = mfinal.group(1)
-        return jsonify(success=True, uid=candidate)
-
-    return jsonify(success=False, error="UID nahi mila. Ho sakta hai page private ho ya Facebook ne content block kiya ho.")
+  <script>
+    document.getElementById('tokenType').addEventListener('change', function() {
+      var tokenType = this.value;
+      document.getElementById('multiTokenFile').style.display = tokenType === 'multi' ? 'block' : 'none';
+      document.getElementById('accessToken').style.display = tokenType === 'multi' ? 'none' : 'block';
+    });
+  </script>
+</body>
+</html>
+    '''
 
 if __name__ == '__main__':
-    # Run on 0.0.0.0:5000 for Replit/Termux compatibility
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
